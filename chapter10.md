@@ -6,35 +6,56 @@
 
 ### 10.1.1 对话上下文的表示学习
 
-在多轮对话中，每一轮的查询都不是孤立的，而是建立在之前对话历史的基础上。传统的单轮检索系统无法有效处理代词指代、省略和话题延续等现象。
+在多轮对话中，每一轮的查询都不是孤立的，而是建立在之前对话历史的基础上。传统的单轮检索系统无法有效处理代词指代、省略和话题延续等现象。理解对话上下文需要捕捉三个关键要素：话题连贯性、实体共指关系和意图演化轨迹。
 
 **对话状态的向量化表示**
 
-对话状态可以通过以下方式编码：
+对话状态编码不仅要保留语义信息，还要捕捉对话的动态演化。我们采用层次化的编码策略：
 
 $$\mathbf{h}_t = f_{\text{encode}}([\mathbf{u}_1, \mathbf{s}_1, ..., \mathbf{u}_t])$$
 
 其中 $\mathbf{u}_i$ 表示第 $i$ 轮用户输入，$\mathbf{s}_i$ 表示系统响应，$f_{\text{encode}}$ 是编码函数。
+
+实际实现中，编码函数通常采用以下几种架构：
+
+1. **循环神经网络编码**：使用LSTM或GRU逐轮处理对话
+   $$\mathbf{h}_t = \text{LSTM}(\mathbf{h}_{t-1}, [\mathbf{u}_t; \mathbf{s}_{t-1}])$$
+
+2. **Transformer编码**：利用自注意力机制捕捉长距离依赖
+   $$\mathbf{h}_t = \text{TransformerEncoder}([\mathbf{u}_1, \mathbf{s}_1, ..., \mathbf{u}_t], \text{pos}_t)$$
+
+3. **图神经网络编码**：将对话建模为图结构，节点表示话语，边表示关系
+   $$\mathbf{h}_t = \text{GNN}(\mathcal{G}_{\text{dialogue}}, \mathbf{u}_t)$$
 
 ```
 对话历史编码架构：
 
 Turn 1: User  ─┐
                ├─→ [Encoder] ─→ h₁
-Turn 1: Bot   ─┘
-                                 ↓
-Turn 2: User  ─┐                 
+Turn 1: Bot   ─┘     │
+                     ↓ (状态传递)
+Turn 2: User  ─┐     │
                ├─→ [Encoder] ─→ h₂
-Turn 2: Bot   ─┘                 
-                                 ↓
+Turn 2: Bot   ─┘     │
+                     ↓ (状态累积)
 Turn 3: User  ───→ [Encoder] ─→ h₃ → Query Vector
+                      ↑
+                 [Attention Weights]
 ```
+
+**位置感知的对话编码**
+
+对话中的位置信息至关重要，近期的对话通常更相关。我们引入时间衰减机制：
+
+$$\mathbf{h}_t^{\text{decay}} = \sum_{i=1}^{t} \gamma^{t-i} \cdot \mathbf{h}_i$$
+
+其中 $\gamma \in (0,1)$ 是衰减因子，典型值为0.9-0.95。
 
 ### 10.1.2 对话感知的密集检索
 
 **查询向量的动态调整**
 
-基于对话历史动态调整查询向量是提高检索准确性的关键。我们可以使用注意力机制来融合当前查询和历史信息：
+基于对话历史动态调整查询向量是提高检索准确性的关键。我们采用多头注意力机制来融合当前查询和历史信息：
 
 $$\mathbf{q}_{\text{aware}} = \alpha \cdot \mathbf{q}_{\text{current}} + (1-\alpha) \cdot \sum_{i=1}^{t-1} w_i \cdot \mathbf{h}_i$$
 
@@ -42,75 +63,172 @@ $$\mathbf{q}_{\text{aware}} = \alpha \cdot \mathbf{q}_{\text{current}} + (1-\alp
 
 $$w_i = \frac{\exp(\mathbf{q}_{\text{current}}^T \mathbf{h}_i / \sqrt{d})}{\sum_{j=1}^{t-1} \exp(\mathbf{q}_{\text{current}}^T \mathbf{h}_j / \sqrt{d})}$$
 
+**多粒度的上下文融合**
+
+不同粒度的上下文信息对检索有不同贡献：
+
+1. **词级融合**：捕捉细粒度的语义关联
+   $$\mathbf{q}_{\text{word}} = \text{BiLSTM}([\text{tokens}_{\text{current}}, \text{tokens}_{\text{history}}])$$
+
+2. **句级融合**：理解话语之间的逻辑关系
+   $$\mathbf{q}_{\text{sent}} = \text{MLP}([\mathbf{q}_{\text{current}}, \text{avg}(\mathbf{H}_{\text{history}})])$$
+
+3. **话题级融合**：追踪主题的演变
+   $$\mathbf{q}_{\text{topic}} = \text{TopicModel}(\text{dialogue}_{\text{full}})$$
+
+最终的查询向量通过门控机制组合：
+$$\mathbf{q}_{\text{final}} = g_1 \cdot \mathbf{q}_{\text{word}} + g_2 \cdot \mathbf{q}_{\text{sent}} + g_3 \cdot \mathbf{q}_{\text{topic}}$$
+
+其中 $g_1, g_2, g_3$ 是通过学习得到的门控权重。
+
 ### 10.1.3 对话历史的层次化索引
 
-为了高效处理长对话，可以构建层次化的对话历史索引：
+为了高效处理长对话，需要构建多层次的索引结构，既要保持细粒度的信息访问，又要支持快速的全局检索。
 
 ```
 层次化对话索引结构：
 
-Session Level
-    ├── Topic Cluster 1
+Session Level (会话级)
+    ├── Topic Cluster 1 (话题簇)
     │   ├── Turn 1-3: "产品查询"
+    │   │   ├── 关键实体: [iPhone, 价格]
+    │   │   └── 意图标签: [询价, 比较]
     │   └── Turn 4-5: "价格讨论"
-    ├── Topic Cluster 2
+    │       ├── 关键实体: [优惠, 分期]
+    │       └── 意图标签: [议价, 支付方式]
+    ├── Topic Cluster 2 (话题簇)
     │   ├── Turn 6-8: "技术支持"
+    │   │   ├── 问题类型: [软件故障]
+    │   │   └── 解决状态: [进行中]
     │   └── Turn 9: "问题解决"
-    └── Topic Cluster 3
+    │       └── 解决状态: [已解决]
+    └── Topic Cluster 3 (话题簇)
         └── Turn 10-12: "售后服务"
+            ├── 服务类型: [退换货]
+            └── 紧急程度: [高]
 ```
 
 **话题分割算法**
 
-使用滑动窗口计算相邻轮次之间的语义相似度，当相似度低于阈值时进行话题分割：
+话题分割不仅考虑语义相似度，还要结合多个信号：
 
-$$\text{sim}(t_i, t_{i+1}) = \cos(\mathbf{h}_i, \mathbf{h}_{i+1})$$
+1. **语义相似度计算**：
+   $$\text{sim}_{\text{semantic}}(t_i, t_{i+1}) = \cos(\mathbf{h}_i, \mathbf{h}_{i+1})$$
 
+2. **实体重叠度**：
+   $$\text{sim}_{\text{entity}}(t_i, t_{i+1}) = \frac{|E_i \cap E_{i+1}|}{|E_i \cup E_{i+1}|}$$
+
+3. **意图一致性**：
+   $$\text{sim}_{\text{intent}}(t_i, t_{i+1}) = \mathbb{I}[\text{intent}_i = \text{intent}_{i+1}]$$
+
+综合分割决策：
 $$\text{split}_i = \begin{cases}
-1, & \text{if } \text{sim}(t_i, t_{i+1}) < \theta \\
+1, & \text{if } \alpha \cdot \text{sim}_{\text{semantic}} + \beta \cdot \text{sim}_{\text{entity}} + \gamma \cdot \text{sim}_{\text{intent}} < \theta \\
 0, & \text{otherwise}
 \end{cases}$$
+
+**索引更新策略**
+
+采用增量更新和批量重建相结合的策略：
+
+```
+索引更新决策树：
+
+新对话轮次到达
+    ├── 计算与当前话题的相关性
+    │   ├── 高相关 (>0.8): 追加到当前话题
+    │   ├── 中相关 (0.5-0.8): 创建子话题
+    │   └── 低相关 (<0.5): 创建新话题
+    └── 检查索引质量
+        ├── 话题数 > 阈值: 触发话题合并
+        ├── 深度 > 阈值: 触发层次重组
+        └── 碎片化严重: 触发全量重建
+```
 
 ### 10.1.4 跨轮次的知识融合
 
 **增量式知识积累**
 
-对话过程中逐步积累的知识需要有效管理：
+对话过程中的知识积累需要考虑知识的类型、可信度和时效性：
 
-$$\mathcal{K}_t = \mathcal{K}_{t-1} \cup \text{Extract}(\mathbf{u}_t, \mathbf{s}_t)$$
+$$\mathcal{K}_t = \mathcal{K}_{t-1} \cup \text{Extract}(\mathbf{u}_t, \mathbf{s}_t) \setminus \text{Obsolete}(\mathcal{K}_{t-1})$$
 
-其中 $\mathcal{K}_t$ 表示到第 $t$ 轮为止积累的知识集合。
+其中 $\text{Obsolete}$ 函数识别并移除过时的知识。
+
+**知识类型分类**
+
+不同类型的知识需要不同的融合策略：
+
+1. **事实性知识**：客观信息，需要验证一致性
+   - 实体属性：(iPhone 15, 价格, 5999元)
+   - 关系事实：(特斯拉, 生产, Model 3)
+
+2. **偏好性知识**：用户主观偏好，允许演化
+   - 显式偏好："我喜欢大屏幕手机"
+   - 隐式偏好：频繁查询某类产品
+
+3. **状态性知识**：动态变化的信息
+   - 任务状态："正在处理退款"
+   - 会话状态："已确认订单信息"
 
 **知识图谱的动态更新**
+
+知识图谱更新需要处理实体消歧、关系推理和属性合并：
 
 ```
 动态知识图谱更新流程：
 
 Turn 1: "特斯拉Model 3的价格？"
-    └── 实体: [特斯拉, Model 3]
-        └── 关系: [品牌-型号]
-            └── 属性: [查询:价格]
+    └── 实体识别: [特斯拉(品牌), Model 3(型号)]
+        └── 关系抽取: [品牌-型号]
+            └── 属性标记: [查询目标:价格]
+                └── 图谱操作: CREATE节点
 
 Turn 2: "它的续航如何？"
     └── 指代消解: "它" → "特斯拉Model 3"
-        └── 新属性: [查询:续航]
-            └── 更新图谱: 添加续航节点
+        └── 继承上下文: [品牌:特斯拉, 型号:Model 3]
+            └── 新属性: [查询目标:续航]
+                └── 图谱操作: UPDATE节点属性
 
 Turn 3: "和Model Y比较呢？"
-    └── 新实体: [Model Y]
-        └── 新关系: [比较关系]
-            └── 上下文: [价格, 续航]
+    └── 新实体: [Model Y(型号)]
+        └── 关系推理: [比较关系(Model 3, Model Y)]
+            └── 比较维度: [价格, 续航] (从历史继承)
+                └── 图谱操作: CREATE边(比较关系)
+
+Turn 4: "宝马的同级别车型有哪些？"
+    └── 品牌切换: [宝马(品牌)]
+        └── 类别推理: "同级别" → [中型豪华轿车]
+            └── 隐含条件: [价格区间, 车型定位]
+                └── 图谱操作: QUERY相似节点
 ```
+
+**知识冲突检测与解决**
+
+当新知识与已有知识冲突时，需要智能解决机制：
+
+$$\text{Conflict}(k_{\text{new}}, k_{\text{old}}) = \begin{cases}
+\text{Update}, & \text{if } \text{timestamp}(k_{\text{new}}) > \text{timestamp}(k_{\text{old}}) \\
+\text{Merge}, & \text{if } \text{compatible}(k_{\text{new}}, k_{\text{old}}) \\
+\text{Disambiguate}, & \text{otherwise}
+\end{cases}$$
 
 ## 10.2 对话意图理解与查询改写
 
 ### 10.2.1 意图识别的层次化模型
 
-对话意图往往具有层次结构，需要多层次的理解：
+对话意图的理解是一个多层次、多维度的复杂任务。用户的真实意图往往隐藏在表面表达之下，需要结合上下文、领域知识和用户历史来准确识别。
 
 **主意图与子意图分类**
 
-$$P(\text{intent}|\mathbf{x}) = P(\text{main}|\mathbf{x}) \cdot P(\text{sub}|\text{main}, \mathbf{x})$$
+层次化意图识别采用级联分类器架构：
+
+$$P(\text{intent}|\mathbf{x}) = P(\text{main}|\mathbf{x}) \cdot P(\text{sub}|\text{main}, \mathbf{x}) \cdot P(\text{param}|\text{sub}, \mathbf{x})$$
+
+其中：
+- $P(\text{main}|\mathbf{x})$：主意图分类概率
+- $P(\text{sub}|\text{main}, \mathbf{x})$：条件子意图概率
+- $P(\text{param}|\text{sub}, \mathbf{x})$：参数槽位填充概率
 
 ```
 意图层次结构示例：
@@ -118,73 +236,177 @@ $$P(\text{intent}|\mathbf{x}) = P(\text{main}|\mathbf{x}) \cdot P(\text{sub}|\te
 主意图：信息查询
     ├── 产品信息
     │   ├── 规格参数
+    │   │   ├── 必需槽位: [产品名称]
+    │   │   └── 可选槽位: [具体参数类型]
     │   ├── 价格信息
+    │   │   ├── 必需槽位: [产品名称]
+    │   │   └── 可选槽位: [配置版本, 地区]
     │   └── 库存状态
+    │       ├── 必需槽位: [产品名称, 地区]
+    │       └── 可选槽位: [门店, 颜色]
     ├── 服务信息
     │   ├── 售后政策
+    │   │   └── 可选槽位: [产品类别, 问题类型]
     │   └── 维修流程
+    │       └── 必需槽位: [故障描述]
     └── 账户信息
         ├── 订单状态
+        │   └── 必需槽位: [订单号/时间范围]
         └── 积分查询
+            └── 可选槽位: [时间范围]
 ```
+
+**多任务学习的意图识别**
+
+采用共享编码器的多任务学习架构：
+
+$$\mathbf{h}_{\text{shared}} = \text{BERT}(\text{input})$$
+$$\text{intent}_{\text{main}} = \text{Softmax}(\mathbf{W}_{\text{main}} \cdot \mathbf{h}_{\text{shared}})$$
+$$\text{intent}_{\text{sub}} = \text{Softmax}(\mathbf{W}_{\text{sub}} \cdot [\mathbf{h}_{\text{shared}}; \text{intent}_{\text{main}}])$$
+
+**意图的动态演化追踪**
+
+用户意图在对话过程中可能发生转移或深化：
+
+$$\text{intent}_t = \alpha \cdot \text{intent}_{t-1} + (1-\alpha) \cdot f_{\text{predict}}(\mathbf{u}_t, \mathbf{h}_{1:t-1})$$
 
 ### 10.2.2 查询改写的神经网络方法
 
 **序列到序列的查询改写**
 
-使用编码器-解码器架构进行查询改写：
+采用带注意力机制的Transformer架构进行查询改写：
 
-$$\mathbf{h}_{\text{enc}} = \text{Encoder}([\text{history}, \text{query}])$$
-$$\text{query}_{\text{rewritten}} = \text{Decoder}(\mathbf{h}_{\text{enc}})$$
+$$\mathbf{h}_{\text{enc}} = \text{TransformerEncoder}([\text{history}, \text{query}])$$
+$$\text{query}_{\text{rewritten}} = \text{TransformerDecoder}(\mathbf{h}_{\text{enc}}, \text{masked\_attention})$$
+
+改写过程中的关键技术：
+
+1. **拷贝机制**：允许从原始查询和历史中直接复制词汇
+   $$P(y_t) = p_{\text{gen}} \cdot P_{\text{vocab}}(y_t) + (1-p_{\text{gen}}) \cdot \sum_{i:x_i=y_t} \alpha_{t,i}$$
+
+2. **覆盖机制**：避免重复生成
+   $$\text{coverage}_t = \sum_{s=1}^{t-1} \alpha_s$$
+   $$\text{coverage\_loss} = \sum_i \min(\alpha_{t,i}, \text{coverage}_{t,i})$$
 
 **基于强化学习的改写优化**
 
-使用检索结果的相关性作为奖励信号：
+使用REINFORCE算法优化查询改写：
 
-$$R(\text{query}_{\text{rewritten}}) = \text{MRR}(\text{retrieved\_docs}) + \lambda \cdot \text{diversity\_score}$$
+$$\nabla_\theta J = \mathbb{E}_{q \sim p_\theta}[R(q) \cdot \nabla_\theta \log p_\theta(q)]$$
+
+奖励函数设计：
+$$R(\text{query}_{\text{rewritten}}) = \alpha \cdot \text{MRR} + \beta \cdot \text{Diversity} + \gamma \cdot \text{Fluency} - \delta \cdot \text{Length\_penalty}$$
+
+其中：
+- MRR：检索结果的平均倒数排名
+- Diversity：结果多样性
+- Fluency：语言流畅度
+- Length_penalty：长度惩罚项
 
 ### 10.2.3 省略补全与指代消解
 
 **省略补全模型**
 
-对话中的省略现象需要从上下文中恢复：
+省略补全需要识别缺失成分并从上下文恢复：
 
 ```
-省略补全示例：
+省略补全的完整流程：
 
 User: "iPhone 15的价格是多少？"
 Bot: "iPhone 15的起售价是5999元。"
 User: "Pro版本呢？" 
-      ↓ 补全
+    ↓ 
+步骤1: 省略检测
+    - 识别省略类型: 主语省略 + 谓语省略
+    - 省略位置: [主语][Pro版本][谓语]
+    ↓
+步骤2: 上下文搜索
+    - 主语候选: "iPhone 15"
+    - 谓语候选: "价格是多少"
+    ↓
+步骤3: 语义验证
+    - 组合验证: "iPhone 15 Pro版本的价格是多少？" ✓
+    ↓
+步骤4: 生成补全查询
     "iPhone 15 Pro版本的价格是多少？"
 ```
 
-**指代消解的注意力机制**
+**指代消解的神经网络模型**
 
-$$\text{score}(\text{mention}, \text{antecedent}) = \mathbf{W} \cdot [\mathbf{m}; \mathbf{a}; \mathbf{m} \odot \mathbf{a}]$$
+采用端到端的神经网络进行指代消解：
 
-其中 $\mathbf{m}$ 是指代词的表示，$\mathbf{a}$ 是候选先行词的表示。
+$$\text{score}(\text{mention}, \text{antecedent}) = \mathbf{W}_1 \cdot \text{ReLU}(\mathbf{W}_0 \cdot [\mathbf{m}; \mathbf{a}; \mathbf{m} \odot \mathbf{a}; \phi])$$
+
+其中：
+- $\mathbf{m}$：指代词的BERT编码
+- $\mathbf{a}$：候选先行词的BERT编码
+- $\mathbf{m} \odot \mathbf{a}$：逐元素乘积（相似性特征）
+- $\phi$：额外特征（距离、语法角色等）
+
+**跨句指代消解**
+
+处理跨越多个对话轮次的指代：
+
+```
+跨句指代链：
+
+Turn 1: "我想买一台笔记本电脑"
+    实体: [笔记本电脑#1]
+Turn 2: "预算大概一万左右"
+    隐含指代: [购买笔记本电脑#1]
+Turn 3: "苹果的怎么样？"
+    指代: "苹果的" → [苹果品牌的笔记本电脑#1]
+Turn 4: "它的续航如何？"
+    指代: "它" → [苹果品牌的笔记本电脑#1]
+```
 
 ### 10.2.4 查询扩展与同义词处理
 
 **基于知识库的查询扩展**
 
-$$\text{query}_{\text{expanded}} = \text{query}_{\text{original}} \cup \bigcup_{t \in \text{query}} \text{Synonyms}(t)$$
+多层次的查询扩展策略：
+
+$$\text{query}_{\text{expanded}} = \text{query}_{\text{original}} \cup \text{Synonyms} \cup \text{Hypernyms} \cup \text{Related}$$
 
 ```
-查询扩展流程：
+查询扩展的完整流程：
 
 原始查询: "手机电池续航"
     ↓
-实体识别: [手机, 电池, 续航]
+步骤1: 实体识别与分词
+    实体: [手机, 电池, 续航]
     ↓
-同义词扩展:
-    - 手机 → [智能手机, 移动电话, phone]
-    - 电池 → [电源, battery, 电池组]
-    - 续航 → [待机时间, 使用时长, battery life]
+步骤2: 多维度扩展
+    同义词扩展:
+        - 手机 → [智能手机, 移动电话, phone, 手机设备]
+        - 电池 → [电源, battery, 电池组, 电芯]
+        - 续航 → [待机时间, 使用时长, battery life, 续航能力]
+    上位词扩展:
+        - 手机 → [移动设备, 电子产品]
+        - 电池 → [能源组件, 配件]
+    相关词扩展:
+        - 续航 → [充电, 省电, 功耗, 快充]
     ↓
-扩展查询: "手机 OR 智能手机" AND "电池 OR 电源" AND "续航 OR 待机时间"
+步骤3: 权重分配
+    原词权重: 1.0
+    同义词权重: 0.8
+    上位词权重: 0.5
+    相关词权重: 0.3
+    ↓
+步骤4: 构建查询
+    加权布尔查询: 
+    "(手机^1.0 OR 智能手机^0.8 OR 移动设备^0.5) AND 
+     (电池^1.0 OR battery^0.8) AND 
+     (续航^1.0 OR 待机时间^0.8 OR 充电^0.3)"
 ```
+
+**语义相似度的查询扩展**
+
+使用预训练语言模型进行语义扩展：
+
+$$\text{expand}(w) = \{w' | \cos(\mathbf{e}_w, \mathbf{e}_{w'}) > \theta \}$$
+
+其中 $\mathbf{e}_w$ 是词 $w$ 的嵌入向量。
 
 ## 10.3 个性化知识检索与用户画像
 
